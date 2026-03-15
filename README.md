@@ -52,6 +52,10 @@ python input_macro.py replay -i logs/input_log_20260315_203455_123456.json --spe
 - Đã xử lý nguyên nhân dễ gây cảm giác duplicate ở click:
   - `pynput` trả về callback click 2 lần (press/release).
   - Script chỉ lưu 1 lần tại thời điểm `pressed=True`.
+- Đã xử lý duplicate key log khi giữ phím (OS auto-repeat):
+  - Chỉ ghi `key_press` đầu tiên cho đến khi có `key_release` tương ứng.
+  - Giúp replay không bị lặp chữ/phím ngoài mong muốn.
+- Bổ sung lọc nhiễu duplicate theo thời gian rất ngắn cho `key_press`/`key_release` và `mouse_click` để giảm log trùng do hook hệ thống.
 
 ## Lưu ý
 

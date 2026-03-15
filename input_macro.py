@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Record and replay keyboard/mouse input on Windows 10.
 
-Requires: pip install pynput
+Requirements:
+    pip install pynput
 """
 
 from __future__ import annotations
@@ -22,6 +23,11 @@ ALLOWED_MOUSE_BUTTONS = {mouse.Button.left, mouse.Button.middle, mouse.Button.ri
 
 
 class InputRecorder:
+    """Record global keyboard/mouse actions to a timestamped JSON file."""
+
+    CLICK_DUPLICATE_WINDOW_SEC = 0.03
+    KEY_DUPLICATE_WINDOW_SEC = 0.01
+
     def __init__(self, output_dir: Path, output_prefix: str = "input_log") -> None:
         self.output_dir = output_dir
         self.output_prefix = output_prefix
@@ -29,6 +35,7 @@ class InputRecorder:
         self.keyboard_listener: Optional[keyboard.Listener] = None
         self.start_time = 0.0
         self.events: list[Dict[str, Any]] = []
+        self.pressed_keys: set[tuple[str, str]] = set()
 
     def _timestamp(self) -> float:
         return time.perf_counter() - self.start_time
@@ -38,62 +45,76 @@ class InputRecorder:
             return {"kind": "char", "value": key.char or ""}
         return {"kind": "special", "value": key.name}
 
+    def _key_signature(self, key: keyboard.KeyCode | keyboard.Key) -> tuple[str, str]:
+        serialized = self._serialize_key(key)
+        return serialized["kind"], serialized["value"]
+
+    def _is_duplicate_event(self, candidate: Dict[str, Any]) -> bool:
+        if not self.events:
+            return False
+
+        last = self.events[-1]
+        same_type = last.get("event") == candidate.get("event")
+        if not same_type:
+            return False
+
+        delta = float(candidate["time"]) - float(last.get("time", 0.0))
+        if delta < 0:
+            return False
+
+        if candidate["event"] == "mouse_click":
+            return (
+                delta <= self.CLICK_DUPLICATE_WINDOW_SEC
+                and last.get("x") == candidate.get("x")
+                and last.get("y") == candidate.get("y")
+                and last.get("button") == candidate.get("button")
+            )
+
+        if candidate["event"] in {"key_press", "key_release"}:
+            return delta <= self.KEY_DUPLICATE_WINDOW_SEC and last.get("key") == candidate.get("key")
+
+        return False
+
+    def _add_event(self, event_type: str, **payload: Any) -> None:
+        candidate = {"time": self._timestamp(), "event": event_type, **payload}
+        if self._is_duplicate_event(candidate):
+            return
+        self.events.append(candidate)
+
     def _on_key_press(self, key: keyboard.KeyCode | keyboard.Key) -> Optional[bool]:
         if key == STOP_RECORD_KEY:
             return False
 
-        self.events.append(
-            {
-                "time": self._timestamp(),
-                "event": "key_press",
-                "key": self._serialize_key(key),
-            }
-        )
+        key_sig = self._key_signature(key)
+        # Ignore auto-repeat key_press while key is still held down.
+        if key_sig in self.pressed_keys:
+            return None
+
+        self.pressed_keys.add(key_sig)
+        self._add_event("key_press", key={"kind": key_sig[0], "value": key_sig[1]})
         return None
 
     def _on_key_release(self, key: keyboard.KeyCode | keyboard.Key) -> Optional[bool]:
         if key == STOP_RECORD_KEY:
             return False
 
-        self.events.append(
-            {
-                "time": self._timestamp(),
-                "event": "key_release",
-                "key": self._serialize_key(key),
-            }
-        )
+        key_sig = self._key_signature(key)
+        self.pressed_keys.discard(key_sig)
+        self._add_event("key_release", key={"kind": key_sig[0], "value": key_sig[1]})
         return None
 
     def _on_mouse_click(self, x: int, y: int, button: mouse.Button, pressed: bool) -> None:
         if button not in ALLOWED_MOUSE_BUTTONS:
             return
 
-        # pynput phát ra 2 callback cho mỗi click (pressed=True/False).
-        # Chỉ lưu pressed=True để tránh duplicate log click.
+        # Keep only press-phase click to avoid pressed/released duplication.
         if not pressed:
             return
 
-        self.events.append(
-            {
-                "time": self._timestamp(),
-                "event": "mouse_click",
-                "x": x,
-                "y": y,
-                "button": button.name,
-            }
-        )
+        self._add_event("mouse_click", x=x, y=y, button=button.name)
 
     def _on_mouse_scroll(self, x: int, y: int, dx: int, dy: int) -> None:
-        self.events.append(
-            {
-                "time": self._timestamp(),
-                "event": "mouse_scroll",
-                "x": x,
-                "y": y,
-                "dx": dx,
-                "dy": dy,
-            }
-        )
+        self._add_event("mouse_scroll", x=x, y=y, dx=dx, dy=dy)
 
     def _build_output_file(self) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -112,7 +133,7 @@ class InputRecorder:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         output_file = self._build_output_file()
 
-        print(f"Bắt đầu ghi input. Nhấn F8 để dừng...\nFile log: {output_file}")
+        print(f"Bắt đầu ghi. Nhấn F8 để dừng.\nFile log: {output_file}")
         self.start_time = time.perf_counter()
 
         self.mouse_listener = mouse.Listener(
@@ -136,6 +157,8 @@ class InputRecorder:
 
 
 class InputReplayer:
+    """Replay recorded keyboard/mouse actions from a JSON file."""
+
     def __init__(self, input_file: Path, speed: float = 1.0) -> None:
         if speed <= 0:
             raise ValueError("speed phải lớn hơn 0")
@@ -182,6 +205,7 @@ class InputReplayer:
                 return False
             remaining = end_time - time.perf_counter()
             time.sleep(min(0.01, max(remaining, 0)))
+
         return not self.stop_requested.is_set()
 
     def _start_stop_listener(self) -> None:
@@ -194,6 +218,40 @@ class InputReplayer:
             self.stop_listener.stop()
             self.stop_listener = None
 
+    def _apply_event(self, event_data: Dict[str, Any]) -> None:
+        event_type = event_data["event"]
+
+        if event_type == "mouse_click":
+            self.mouse_controller.position = (event_data["x"], event_data["y"])
+            button = getattr(mouse.Button, event_data["button"], mouse.Button.left)
+            self.mouse_controller.click(button)
+            return
+
+        if event_type == "mouse_scroll":
+            self.mouse_controller.position = (event_data["x"], event_data["y"])
+            self.mouse_controller.scroll(event_data["dx"], event_data["dy"])
+            return
+
+        if event_type == "key_press":
+            key = self._deserialize_key(event_data["key"])
+            self.injecting_event = True
+            try:
+                self.keyboard_controller.press(key)
+            finally:
+                self.injecting_event = False
+            return
+
+        if event_type == "key_release":
+            key = self._deserialize_key(event_data["key"])
+            self.injecting_event = True
+            try:
+                self.keyboard_controller.release(key)
+            finally:
+                self.injecting_event = False
+            return
+
+        print(f"Bỏ qua event không hỗ trợ: {event_type}")
+
     def replay(self) -> None:
         events = json.loads(self.input_file.read_text(encoding="utf-8"))
         if not events:
@@ -202,7 +260,7 @@ class InputReplayer:
 
         self._start_stop_listener()
         try:
-            print("Bắt đầu replay sau 3 giây. Nhấn ESC để ngắt. Chuyển sang cửa sổ mục tiêu...")
+            print("Replay bắt đầu sau 3 giây. Nhấn ESC để ngắt...")
             if not self._sleep_with_interrupt(3):
                 print("Replay đã bị ngắt bởi ESC.")
                 return
@@ -220,31 +278,7 @@ class InputReplayer:
                     return
                 prev_time = event_time
 
-                event_type = event_data["event"]
-
-                if event_type == "mouse_click":
-                    self.mouse_controller.position = (event_data["x"], event_data["y"])
-                    btn = getattr(mouse.Button, event_data["button"], mouse.Button.left)
-                    self.mouse_controller.click(btn)
-                elif event_type == "mouse_scroll":
-                    self.mouse_controller.position = (event_data["x"], event_data["y"])
-                    self.mouse_controller.scroll(event_data["dx"], event_data["dy"])
-                elif event_type == "key_press":
-                    key = self._deserialize_key(event_data["key"])
-                    self.injecting_event = True
-                    try:
-                        self.keyboard_controller.press(key)
-                    finally:
-                        self.injecting_event = False
-                elif event_type == "key_release":
-                    key = self._deserialize_key(event_data["key"])
-                    self.injecting_event = True
-                    try:
-                        self.keyboard_controller.release(key)
-                    finally:
-                        self.injecting_event = False
-                else:
-                    print(f"Bỏ qua event không hỗ trợ: {event_type}")
+                self._apply_event(event_data)
 
             print("Replay hoàn tất.")
         finally:
@@ -252,31 +286,29 @@ class InputReplayer:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Record/replay keyboard + mouse input trên Windows 10"
-    )
-    sub = parser.add_subparsers(dest="mode", required=True)
+    parser = argparse.ArgumentParser(description="Record/replay thao tác bàn phím + chuột")
+    subparsers = parser.add_subparsers(dest="mode", required=True)
 
-    record_parser = sub.add_parser("record", help="Ghi input")
+    record_parser = subparsers.add_parser("record", help="Ghi input")
     record_parser.add_argument(
         "-d",
         "--output-dir",
         default="logs",
-        help="Thư mục lưu log (mỗi lần record tạo file mới theo timestamp)",
+        help="Thư mục lưu log (mỗi lần record tạo file mới)",
     )
     record_parser.add_argument(
         "--prefix",
         default="input_log",
-        help="Tiền tố tên file log, ví dụ input_log_YYYYmmdd_HHMMSS.json",
+        help="Tiền tố tên file log, ví dụ input_log_YYYYmmdd_HHMMSS_microseconds.json",
     )
 
-    replay_parser = sub.add_parser("replay", help="Phát lại input đã ghi")
-    replay_parser.add_argument("-i", "--input", required=True, help="File log đầu vào")
+    replay_parser = subparsers.add_parser("replay", help="Phát lại input đã ghi")
+    replay_parser.add_argument("-i", "--input", required=True, help="Đường dẫn file log đầu vào")
     replay_parser.add_argument(
         "--speed",
         type=float,
         default=1.0,
-        help="Tốc độ replay (1.0 = thời gian gốc, 2.0 = nhanh gấp đôi)",
+        help="Tốc độ replay (1.0 = gốc, 2.0 = nhanh gấp đôi)",
     )
 
     return parser
@@ -289,8 +321,10 @@ def main() -> None:
     if args.mode == "record":
         recorder = InputRecorder(Path(args.output_dir), output_prefix=args.prefix)
         recorder.record()
-    else:
-        InputReplayer(Path(args.input), speed=args.speed).replay()
+        return
+
+    replayer = InputReplayer(Path(args.input), speed=args.speed)
+    replayer.replay()
 
 
 if __name__ == "__main__":

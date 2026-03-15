@@ -21,15 +21,8 @@ class Replayer:
         self._stop_event = threading.Event()
 
     def load_commands(self) -> List[Dict[str, Any]]:
-        """Đọc danh sách command từ file JSON."""
+        """Đọc danh sách command từ file JSON đã được convert."""
         return json.loads(self.input_file.read_text(encoding="utf-8"))
-
-    @staticmethod
-    def normalize_key_for_pyautogui(key: str) -> str:
-        """Chuẩn hóa tên phím từ log (`Key.xxx`) sang format pyautogui."""
-        if key.startswith("Key."):
-            return key.split(".", 1)[1]
-        return key
 
     @staticmethod
     def move_mouse(x: int, y: int) -> None:
@@ -46,13 +39,18 @@ class Replayer:
         """Cuộn chuột theo giá trị delta."""
         pyautogui.scroll(delta)
 
-    def key_press(self, key: str, event_type: str = "key_down") -> None:
-        """Nhấn hoặc nhả phím theo loại sự kiện đã record."""
-        normalized = self.normalize_key_for_pyautogui(key)
+    @staticmethod
+    def key_press(key: str, event_type: str = "key_down") -> None:
+        """Nhấn hoặc nhả phím theo lệnh đã convert sẵn."""
         if event_type == "key_up":
-            pyautogui.keyUp(normalized)
+            pyautogui.keyUp(key)
         else:
-            pyautogui.keyDown(normalized)
+            pyautogui.keyDown(key)
+
+    @staticmethod
+    def key_hotkey(keys: List[str]) -> None:
+        """Thực thi tổ hợp phím, ví dụ ['ctrl', 'c']."""
+        pyautogui.hotkey(*keys)
 
     @staticmethod
     def sleep(delay: float) -> None:
@@ -78,6 +76,10 @@ class Replayer:
             self.mouse_click(str(command.get("button", "left")))
         elif action == "scroll":
             self.mouse_scroll(int(command.get("delta", 0)))
+        elif action == "hotkey":
+            keys = command.get("keys", [])
+            if isinstance(keys, list) and keys:
+                self.key_hotkey([str(key) for key in keys])
         elif action == "key":
             key = command.get("key")
             if key:

@@ -16,6 +16,8 @@ Dự án Python để:
 - `convert.py`
   - Module convert chạy độc lập (tùy chọn).
   - Dùng khi bạn muốn convert lại từ một file `raw_log_*.json`.
+  - Tự xử lý dữ liệu thô cho replay: chuẩn hóa key, giảm key lặp do auto-repeat, và nhận diện tổ hợp phím (vd: `Ctrl+C`, `Ctrl+V`).
+
 - `replay.py`
   - Đọc file `log_convert` và phát lại thao tác bằng `pyautogui`.
   - Có thể chọn file đầu vào bằng tham số `-i/--input`.
@@ -62,7 +64,7 @@ Ví dụ:
 [
   {"action": "move", "x": 530, "y": 410, "delay": 0.2},
   {"action": "click", "button": "left", "delay": 0.0},
-  {"action": "key", "event": "key_down", "key": "a", "delay": 0.1}
+  {"action": "hotkey", "keys": ["ctrl", "c"], "delay": 0.1}
 ]
 ```
 

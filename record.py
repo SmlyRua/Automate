@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional
 
 from pynput import keyboard, mouse
 
+from convert import LogConverter
+
 
 class InputRecorder:
     """Ghi sự kiện input và xuất cả log thô + log replay."""
@@ -106,68 +108,6 @@ class InputRecorder:
             scroll_delta=dy,
         )
 
-    @staticmethod
-    def normalize_timestamps(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Chuẩn hóa timestamp để sự kiện đầu tiên có mốc 0.0."""
-        if not events:
-            return []
-
-        first_ts = float(events[0].get("timestamp", 0.0))
-        normalized: List[Dict[str, Any]] = []
-        for event in events:
-            item = dict(event)
-            item["timestamp"] = max(0.0, float(item.get("timestamp", 0.0)) - first_ts)
-            normalized.append(item)
-        return normalized
-
-    @staticmethod
-    def calculate_delays(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Tính độ trễ giữa các sự kiện liên tiếp."""
-        previous_ts = 0.0
-        output: List[Dict[str, Any]] = []
-
-        for event in events:
-            current_ts = float(event.get("timestamp", 0.0))
-            delay = max(0.0, current_ts - previous_ts)
-            item = dict(event)
-            item["delay"] = round(delay, 6)
-            output.append(item)
-            previous_ts = current_ts
-
-        return output
-
-    @staticmethod
-    def to_replay_commands(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Đổi event thô sang danh sách lệnh cho replay.py."""
-        commands: List[Dict[str, Any]] = []
-
-        for event in events:
-            event_type = event.get("event_type")
-            x = event.get("mouse_x")
-            y = event.get("mouse_y")
-            delay = float(event.get("delay", 0.0))
-
-            if event_type == "mouse_click":
-                if x is not None and y is not None:
-                    commands.append({"action": "move", "x": x, "y": y, "delay": delay})
-                commands.append({"action": "click", "button": event.get("button", "left"), "delay": 0.0})
-
-            elif event_type == "mouse_scroll":
-                if x is not None and y is not None:
-                    commands.append({"action": "move", "x": x, "y": y, "delay": delay})
-                commands.append({"action": "scroll", "delta": event.get("scroll_delta", 0), "delay": 0.0})
-
-            elif event_type in {"key_down", "key_up"}:
-                commands.append(
-                    {
-                        "action": "key",
-                        "event": event_type,
-                        "key": event.get("key"),
-                        "delay": delay,
-                    }
-                )
-
-        return commands
 
     def save_raw(self) -> None:
         """Lưu log thô ra file JSON."""
@@ -176,9 +116,9 @@ class InputRecorder:
 
     def save_converted(self) -> None:
         """Convert và lưu file lệnh replay ngay sau khi record."""
-        normalized = self.normalize_timestamps(self.events)
-        with_delays = self.calculate_delays(normalized)
-        commands = self.to_replay_commands(with_delays)
+        normalized = LogConverter.normalize_timestamps(self.events)
+        with_delays = LogConverter.calculate_delays(normalized)
+        commands = LogConverter(input_file=str(self.raw_output_file), output_file=str(self.replay_output_file)).to_replay_commands(with_delays)
         self.replay_output_file.write_text(json.dumps(commands, indent=2), encoding="utf-8")
         print(f"Đã lưu log replay: {self.replay_output_file} ({len(commands)} lệnh)")
 
